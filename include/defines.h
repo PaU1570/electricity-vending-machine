@@ -12,13 +12,15 @@
 #define PIN_PZEM_TX 1
 
 // Coin/bill acceptor defines
-#define PIN_COIN_ACCEPTOR 7
-#define PIN_BILL_ACCEPTOR 20
-#define PIN_BILL_ACCEPTOR_INHIBIT 21 // tie to ground to enable bill acceptor
+#define PIN_COIN_ACCEPTOR 5
+#define PIN_BILL_ACCEPTOR 18
+#define PIN_BILL_ACCEPTOR_INHIBIT 19 // tie to ground to enable bill acceptor
 
 // Relay defines
-#define PIN_RELAY_1 17
-#define PIN_RELAY_2 22
+#define PIN_RELAY_L 17
+#define PIN_RELAY_R 16
+#define RELAY_ON 1
+#define RELAY_OFF 0
 
 // Button defines
 #define PIN_BUTTON_L 11
