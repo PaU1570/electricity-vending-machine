@@ -1,6 +1,14 @@
 #ifndef DEFINES_H
 #define DEFINES_H
 
+// General defines
+#define UPDATE_INTERVAL_MS 15
+typedef enum {
+    NONE = 0,
+    LEFT,
+    RIGHT
+} side_t;
+
 // I2C defines
 #define I2C_PORT i2c1
 #define PIN_I2C_SDA 26
@@ -8,8 +16,14 @@
 #define PIN_I2C_VCC 28
 
 // PZEM-004T defines
-#define PIN_PZEM_RX 0
-#define PIN_PZEM_TX 1
+// Use pins 0 and 1 for UART0
+// Pins can be changed, see the GPIO function select table in the datasheet for information on GPIO assignments
+#define UART_ID_PZEM uart0
+#define PIN_PZEM_RX 1
+#define PIN_PZEM_TX 0
+// Modbus RTU addresses for PZEM-004T. Must be set beforehand one by one using the pzem library.
+#define ADDR_PZEM_L 0x01
+#define ADDR_PZEM_R 0x02
 
 // Coin/bill acceptor defines
 #define PIN_COIN_ACCEPTOR 5

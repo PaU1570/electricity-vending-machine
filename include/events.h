@@ -5,7 +5,7 @@
 
 typedef enum {
     EVENT_NONE = 0,
-    EVENT_PZEM_DATA,
+    EVENT_DECREASE_BALANCE,
     EVENT_BUTTON_L = PIN_BUTTON_L,
     EVENT_BUTTON_R = PIN_BUTTON_R,
     EVENT_COIN_ACCEPTOR = PIN_COIN_ACCEPTOR,
@@ -16,7 +16,8 @@ typedef enum {
 
 typedef struct {
     event_name_t name;
-    uint8_t data;
+    side_t side;
+    uint32_t data;
 } event_t;
 
 #endif

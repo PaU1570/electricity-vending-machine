@@ -2,16 +2,17 @@
 #include "pico/stdlib.h"
 #include "pico/util/queue.h"
 #include "pico/time.h"
+#include "pico/multicore.h"
 #include "hardware/i2c.h"
 #include "SH1106_I2C.h"
 #include "FONT_spleen_8x16.h"
 #include "events.h"
 #include "defines.h"
+#include "pzem-004t_modbus-rtu.h"
 
 typedef struct {
-    uint64_t balance_cents;
-    uint64_t balance_wh;
-    uint64_t total_energy_wh;
+    uint32_t balance_cents;
+    uint32_t balance_wh;
     uint8_t relay_state;
 } meter_state_t;
 
@@ -19,8 +20,9 @@ typedef struct {
     meter_state_t left;
     meter_state_t right;
     uint32_t price_cents_per_kwh;
-    uint64_t pending_balance_cents;
-    enum {NONE, LEFT, RIGHT} selected;
+    uint32_t price_wh_per_cent;
+    uint32_t pending_balance_cents;
+    side_t selected;
 } state_t;
 
 state_t state = {0};
@@ -40,6 +42,12 @@ void gpio_callback(uint gpio, uint32_t events);
 // timers
 bool button_debounce_timer_callback(repeating_timer_t *rt);
 bool side_select_timer_callback(repeating_timer_t *rt);
+bool pzem_polling_timer_callback(repeating_timer_t *rt);
+typedef struct {
+    pzem004t_data_t pzem_data;
+    uint32_t current_energy;
+    side_t side;
+} pzem_polling_timer_data_t;
 
 void update_display();
 void update_wh_balance();
@@ -51,9 +59,21 @@ int main()
 
     // Initialize state
     state.price_cents_per_kwh = 50;
+    if (state.price_cents_per_kwh == 0) {
+        printf("Error: price per kWh cannot be 0\n");
+        return -1;
+    } else if (state.price_cents_per_kwh > 1000) {
+        printf("Error: price per kWh cannot be higher than 1000\n");
+        return -1;
+    }
+    state.price_wh_per_cent = 1000U / state.price_cents_per_kwh;
 
     // Initialize the queue
     queue_init(&event_queue, sizeof(event_t), 100);
+
+    // Initialize PZEM-004T
+    pzem004t_init(UART_ID_PZEM, PIN_PZEM_TX, PIN_PZEM_RX, false);
+    // TODO: reset energy
 
     // Initialize buttons
     gpio_init(PIN_BUTTON_L_GND);
@@ -173,8 +193,21 @@ int main()
                     cancel_repeating_timer(&side_select_timer);
                     add_repeating_timer_us(SIDE_SELECT_TIMEOUT, side_select_timer_callback, NULL, &side_select_timer);
                     break;
-                case EVENT_PZEM_DATA:
-                    // Handle PZEM data event
+                case EVENT_DECREASE_BALANCE:
+                    // Handle decrease balance event
+                    if (event.side == LEFT) {
+                        if (state.left.balance_cents < event.data) {
+                            state.left.balance_cents = 0;
+                        } else {
+                            state.left.balance_cents -= event.data;
+                        }
+                    } else if (event.side == RIGHT) {
+                        if (state.right.balance_cents < event.data) {
+                            state.right.balance_cents = 0;
+                        } else {
+                            state.right.balance_cents -= event.data;
+                        }
+                    }
                     break;
                 case EVENT_RELAY_L:
                     // Handle relay L event
@@ -188,15 +221,24 @@ int main()
         }
         check_balance_and_relay();
         update_display();
-        sleep_ms(15);  
-        // gpio_put(PIN_RELAY_L, RELAY_OFF);
-        // gpio_put(PIN_RELAY_R, RELAY_OFF);
-        // printf("relays off\n");
-        // sleep_ms(5000);
-        // gpio_put(PIN_RELAY_L, RELAY_ON);
-        // gpio_put(PIN_RELAY_R, RELAY_ON);
-        // printf("relays on\n");
-        // sleep_ms(5000);
+        sleep_ms(UPDATE_INTERVAL_MS);  
+    }
+}
+
+void core1_main() {
+    alarm_pool_t *alarm_pool = alarm_pool_create_with_unused_hardware_alarm(1);
+    static repeating_timer_t pzem_polling_timer;
+
+    pzem_polling_timer_data_t data_l = {0};
+    pzem_polling_timer_data_t data_r = {0};
+    data_l.side = LEFT;
+    data_r.side = RIGHT;
+
+    alarm_pool_add_repeating_timer_ms(alarm_pool, UPDATE_INTERVAL_MS, pzem_polling_timer_callback, (void*)(&data_l), &pzem_polling_timer);
+    alarm_pool_add_repeating_timer_ms(alarm_pool, UPDATE_INTERVAL_MS, pzem_polling_timer_callback, (void*)(&data_r), &pzem_polling_timer);
+
+    while (true) {
+        tight_loop_contents();
     }
 }
 
@@ -207,13 +249,13 @@ void gpio_callback(uint gpio, uint32_t events) {
         if (absolute_time_diff_us(button_timestamp, get_absolute_time()) > BUTTON_DEBOUNCE_TIME) {
             button_timestamp = get_absolute_time();
             // printf("Button %d pressed\n", gpio);
-            queue_try_add(&event_queue, &(event_t){.name = gpio, .data = 1});
+            queue_try_add(&event_queue, &(event_t){.name = gpio});
             static repeating_timer_t button_debounce_timer;
             add_repeating_timer_us(BUTTON_DEBOUNCE_CHECKER_TIME, button_debounce_timer_callback, NULL, &button_debounce_timer);
         }
     }
     else { // coin/bill acceptor event
-        queue_add_blocking(&event_queue, &(event_t){.name = gpio, .data = 1});
+        queue_add_blocking(&event_queue, &(event_t){.name = gpio});
     }
 }
 
@@ -234,6 +276,21 @@ bool side_select_timer_callback(repeating_timer_t *rt) {
     state.selected = NONE;
     gpio_put(PIN_BILL_ACCEPTOR_INHIBIT, 1); // Disable bill acceptor
     return false; // Stop the timer
+}
+
+bool pzem_polling_timer_callback(repeating_timer_t *rt) {
+    pzem_polling_timer_data_t *data = (pzem_polling_timer_data_t*)(rt->user_data);
+    uint32_t prev_energy = data->pzem_data.energy;
+    if (pzem004t_read_data((data->side == LEFT) ? ADDR_PZEM_L : ADDR_PZEM_R, &data->pzem_data)) {
+        data->current_energy += (data->pzem_data.energy - prev_energy);
+        if (data->current_energy >= state.price_wh_per_cent) {
+            uint32_t cents = data->current_energy / state.price_wh_per_cent;
+            if (queue_try_add(&event_queue, &(event_t){.name = EVENT_DECREASE_BALANCE, .side = data->side, .data = cents})) {
+                data->current_energy -= cents * state.price_wh_per_cent;
+            }
+        }
+    }
+    return true;
 }
 
 void update_display() {
