@@ -1,3 +1,6 @@
 [submodule "OLED_SH1106_I2C"]
 	path = OLED_SH1106_I2C
 	url = git@github.com:PaU1570/OLED_SH1106_I2C.git
+[submodule "PZEM-004T_UART_Pico"]
+	path = PZEM-004T_UART_Pico
+	url = git@github.com:PaU1570/PZEM-004T_UART_Pico.git
