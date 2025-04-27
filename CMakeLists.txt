@@ -49,7 +49,9 @@ pico_enable_stdio_usb(electricity_vending_machine 1)
 
 # Add the standard library to the build
 target_link_libraries(electricity_vending_machine
-        pico_stdlib)
+        pico_stdlib
+        pico_multicore
+        pico_time)
 
 # Add the standard include files to the build
 target_include_directories(electricity_vending_machine PRIVATE

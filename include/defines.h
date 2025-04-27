@@ -5,8 +5,8 @@
 #define UPDATE_INTERVAL_MS 15
 typedef enum {
     NONE = 0,
-    LEFT,
-    RIGHT
+    RIGHT,
+    LEFT
 } side_t;
 
 // I2C defines
@@ -24,6 +24,7 @@ typedef enum {
 // Modbus RTU addresses for PZEM-004T. Must be set beforehand one by one using the pzem library.
 #define ADDR_PZEM_L 0x01
 #define ADDR_PZEM_R 0x02
+#define PZMEM_POLLING_INTERVAL_MS 100
 
 // Coin/bill acceptor defines
 #define PIN_COIN_ACCEPTOR 5
