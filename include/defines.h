@@ -19,8 +19,8 @@ typedef enum {
 // Use pins 0 and 1 for UART0
 // Pins can be changed, see the GPIO function select table in the datasheet for information on GPIO assignments
 #define UART_ID_PZEM uart0
-#define PIN_PZEM_RX 1
 #define PIN_PZEM_TX 0
+#define PIN_PZEM_RX 1
 // Modbus RTU addresses for PZEM-004T. Must be set beforehand one by one using the pzem library.
 #define ADDR_PZEM_L 0x01
 #define ADDR_PZEM_R 0x02

@@ -28,6 +28,10 @@ typedef struct {
 state_t state = {0};
 queue_t event_queue;
 
+// for debugging
+#define DEBUG 0
+#define DEBUG_POWER_MULT 1 // multiplier for power readings
+
 // for side selection
 #define SIDE_SELECT_TIMEOUT (30 * 1000000) // us (30s)
 absolute_time_t side_select_timestamp;
@@ -35,9 +39,10 @@ absolute_time_t side_select_timestamp;
 // for button debounce
 #define BUTTON_DEBOUNCE_TIME 25000 // us (25ms)
 #define BUTTON_DEBOUNCE_CHECKER_TIME 10000 // us (10ms)
+#define BUTTON_PRESS_TIME 10000 // us (10ms)
 absolute_time_t button_timestamp;
 
-// for coin/bill timer (makes sure that event is only triggered if pulse is long enough, prevents interference from relay)
+// for coin/bill timer
 #define COIN_BILL_WAIT_TIME 25000 // us (25ms) (pulses are 50ms long)
 absolute_time_t coin_bill_timestamp;
 
@@ -45,6 +50,7 @@ absolute_time_t coin_bill_timestamp;
 void gpio_callback(uint gpio, uint32_t events);
 // timers
 bool button_debounce_timer_callback(repeating_timer_t *rt);
+int64_t button_press_alarm_callback(alarm_id_t id, void *data);
 bool side_select_timer_callback(repeating_timer_t *rt);
 bool pzem_polling_timer_callback(repeating_timer_t *rt);
 int64_t coin_bill_alarm_callback(alarm_id_t id, void *data);
@@ -79,7 +85,7 @@ int main()
     queue_init(&event_queue, sizeof(event_t), 100);
 
     // Initialize PZEM-004T
-    if (!pzem004t_init(UART_ID_PZEM, PIN_PZEM_TX, PIN_PZEM_RX, false)) {
+    if (!pzem004t_init(UART_ID_PZEM, PIN_PZEM_TX, PIN_PZEM_RX, true)) {
         printf("Error: PZEM-004T initialization failed\n");
         return -1;
     }
@@ -160,7 +166,9 @@ int main()
                 case EVENT_BUTTON_L: // fallthrough
                 case EVENT_BUTTON_R:
                     // Handle left button press
-                    printf("%s button pressed\n", (event.name == EVENT_BUTTON_L) ? "Left" : "Right");
+                    if (DEBUG) {
+                        printf("%s button pressed\n", (event.name == EVENT_BUTTON_L) ? "Left" : "Right");
+                    }
                     state.selected = (event.name == EVENT_BUTTON_L) ? LEFT : RIGHT;
                     if (state.selected == LEFT) {
                         state.left.balance_cents += state.pending_balance_cents;
@@ -234,17 +242,17 @@ int main()
 }
 
 void core1_main() {
-    alarm_pool_t *alarm_pool = alarm_pool_create_with_unused_hardware_alarm(1);
-    static repeating_timer_t pzem_polling_timer;
+    alarm_pool_t *alarm_pool = alarm_pool_create_with_unused_hardware_alarm(2);
+    static repeating_timer_t pzem_polling_timer_l;
+    static repeating_timer_t pzem_polling_timer_r;
 
     pzem_polling_timer_data_t data_l = {0};
     pzem_polling_timer_data_t data_r = {0};
     data_l.side = LEFT;
     data_r.side = RIGHT;
 
-    alarm_pool_add_repeating_timer_ms(alarm_pool, PZMEM_POLLING_INTERVAL_MS, pzem_polling_timer_callback, (void*)(&data_l), &pzem_polling_timer);
-    alarm_pool_add_repeating_timer_ms(alarm_pool, PZMEM_POLLING_INTERVAL_MS, pzem_polling_timer_callback, (void*)(&data_r), &pzem_polling_timer);
-
+    // alarm_pool_add_repeating_timer_ms(alarm_pool, PZMEM_POLLING_INTERVAL_MS, pzem_polling_timer_callback, (void*)(&data_l), &pzem_polling_timer_l);
+    alarm_pool_add_repeating_timer_ms(alarm_pool, PZMEM_POLLING_INTERVAL_MS, pzem_polling_timer_callback, (void*)(&data_r), &pzem_polling_timer_r);
     while (true) {
         tight_loop_contents();
     }
@@ -252,11 +260,16 @@ void core1_main() {
 
 void gpio_callback(uint gpio, uint32_t events) {
     // Only buttons and coin/bill acceptors trigger interrupts
-    printf("GPIO callback triggered for GPIO %d\n", gpio);
+    // Turning relay on/off causes a spike on the GPIO pins that might trigger the interrupt,
+    // so use alarms to check that the signal is still low after some time (coin/bill acceptor pulses are 50ms long, for button press 10ms works)
+    if (DEBUG) {
+        printf("GPIO callback triggered for GPIO %d\n", gpio);
+    }
     if (gpio == PIN_BUTTON_L || gpio == PIN_BUTTON_R) { // button event
         if (absolute_time_diff_us(button_timestamp, get_absolute_time()) > BUTTON_DEBOUNCE_TIME) {
             button_timestamp = get_absolute_time();
-            queue_try_add(&event_queue, &(event_t){.name = gpio});
+            // Add timer to check that the button stays pressed for BUTTON_PRESS_TIME
+            add_alarm_in_us(BUTTON_PRESS_TIME, button_press_alarm_callback, (void*)(intptr_t)gpio, false);
             static repeating_timer_t button_debounce_timer;
             add_repeating_timer_us(BUTTON_DEBOUNCE_CHECKER_TIME, button_debounce_timer_callback, NULL, &button_debounce_timer);
         }
@@ -277,6 +290,15 @@ bool button_debounce_timer_callback(repeating_timer_t *rt) {
     return false; // Stop the timer
 }
 
+int64_t button_press_alarm_callback(alarm_id_t id, void *data) {
+    uint gpio = (uint)data;
+    if (gpio_get(gpio) == 0) {
+        // Button pressed
+        queue_try_add(&event_queue, &(event_t){.name = gpio});
+    }
+    return 0; // No need to repeat
+}
+
 bool side_select_timer_callback(repeating_timer_t *rt) {
     if (absolute_time_diff_us(side_select_timestamp, get_absolute_time()) < SIDE_SELECT_TIMEOUT) {
         return true; // Keep the timer running
@@ -289,9 +311,12 @@ bool side_select_timer_callback(repeating_timer_t *rt) {
 bool pzem_polling_timer_callback(repeating_timer_t *rt) {
     pzem_polling_timer_data_t *data = (pzem_polling_timer_data_t*)(rt->user_data);
     uint32_t prev_energy = data->pzem_data.energy;
+    static int multiplier = DEBUG ? DEBUG_POWER_MULT : 1;
     if (pzem004t_read_data((data->side == LEFT) ? ADDR_PZEM_L : ADDR_PZEM_R, &data->pzem_data)) {
-        data->current_energy += (data->pzem_data.energy - prev_energy);
-        // printf("Power: %d\tCurrent energy: %d\n", data->pzem_data.power, data->current_energy);
+        data->current_energy += (data->pzem_data.energy - prev_energy) * multiplier;
+        if (DEBUG) {
+            printf("(%s) Power: %d\tCurrent energy: %d\n", data->side == LEFT ? "Left" : "Right", data->pzem_data.power, data->current_energy);
+        }
         if (data->current_energy >= state.price_wh_per_cent) {
             uint32_t cents = data->current_energy / state.price_wh_per_cent;
             if (queue_try_add(&event_queue, &(event_t){.name = EVENT_DECREASE_BALANCE, .side = data->side, .data = cents})) {
@@ -299,7 +324,9 @@ bool pzem_polling_timer_callback(repeating_timer_t *rt) {
             }
         }
     } else {
-        printf("Error: PZEM-004T read failed\n");
+        if (DEBUG) {
+            printf("Error: PZEM-004T read failed (%s)\n", data->side == LEFT ? "Left" : "Right");
+        }
     }
     return true;
 }
@@ -321,14 +348,14 @@ void update_display() {
 
     update_wh_balance();
 
-    if (state.left.balance_wh >= 1000) {
+    if (state.left.balance_wh >= 10000) {
         snprintf(buffer_left, sizeof(buffer_left), "<%05.2f$/%04.1fkWh ", MIN((double)state.left.balance_cents / 100, 99.99), 
         MIN((double)state.left.balance_wh / 1000, 99.9));
     } else {
         snprintf(buffer_left, sizeof(buffer_left), "<%05.2f$/%04.2fkWh ", MIN((double)state.left.balance_cents / 100, 99.99), 
         MIN((double)state.left.balance_wh / 1000, 99.9));
     }
-    if (state.right.balance_wh >= 1000) {
+    if (state.right.balance_wh >= 10000) {
         snprintf(buffer_right, sizeof(buffer_right), " %05.2f$/%04.1fkWh>", MIN((double)state.right.balance_cents / 100, 99.99), 
         MIN((double)state.right.balance_wh / 1000, 99.9));
     } else {
